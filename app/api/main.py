@@ -43,6 +43,8 @@ def predict_attack(request: PredictionRequest):
 @app.post("/predict_severity", response_model=PredictionResponse)
 def predict_severity(request: PredictionRequest):
     result = severity_predictor.predict(request.inputs)
+    mapping = {0:"CRITICAL",1:"HIGH",2:"LOW",3:"MEDIUM",4:"None",5:"NaN"}
+    result["prediction"] = mapping[result["prediction"]]
     return result
 
 @app.post("/predict_rf",response_model=PredictionResponse)
