@@ -1,25 +1,21 @@
 from pathlib import Path
+import joblib
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-def load_model(model_path: str | None):
+def load_model(type:str):
     """
-    Load the model artifact when it exists.
-
-    During setup, the model file may not be available yet. In that case we
-    return None so the API, Streamlit app, and Docker environment can still
-    run in placeholder mode.
-
-    Once the trained model is ready, replace the final return with the right
-    loading call for the artifact format, such as joblib.load(path),
-    pickle.load(file), torch.load(path), or mlflow.pyfunc.load_model(path).
+    Load NLP model artifact when it exists.
     """
-    if not model_path:
-        return None
-
-    path = Path(model_path)
-
-    if not path.exists():
-        return None
+    try:
+        if type=="attack":
+            model = joblib.load(PROJECT_ROOT / 'attack_pipeline.joblib')
+        elif type=="severity":
+            model = joblib.load(PROJECT_ROOT / 'severity_pipeline.joblib')
+        elif type=="random_forest":
+            model = joblib.load(PROJECT_ROOT / 'type_random_forest.pkl')
+    except:
+        model = None
 
     # Temporary placeholder: replace this once the model format is known.
-    return path
+    return model
