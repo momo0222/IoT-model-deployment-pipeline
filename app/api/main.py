@@ -14,6 +14,17 @@ severity_predictor = Predictor(severity_model)
 rf_model = load_model("random_forest")
 rf_predictor = Predictor(rf_model)
 
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "models_loaded": {
+            "attack": attack_model is not None,
+            "severity": severity_model is not None,
+            "random_forest": rf_model is not None,
+        },
+    }
+
 @app.get("/health_attack")
 def health_attack():
     return {

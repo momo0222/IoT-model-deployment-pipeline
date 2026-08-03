@@ -1,8 +1,14 @@
 # MLOps model serving template
 
-This project is a small serving stack for a model that will be added later. It has a FastAPI backend for prediction requests and a Streamlit frontend for trying the model from a browser.
+This project is a small serving stack for an IoT/network intrusion model suite. It has a FastAPI backend for prediction requests and a Streamlit frontend for trying the models from a browser.
 
-The current model code is intentionally a placeholder. The backend and frontend can be tested now, and the model team can plug in the real artifact when it is ready.
+Three trained artifacts are committed at the repo root and loaded by the API:
+
+```text
+attack_pipeline.joblib     # text -> attack type classifier
+severity_pipeline.joblib   # text -> severity classifier
+type_random_forest.pkl     # structured network features -> attack type (random forest)
+```
 
 ## Project layout
 
@@ -18,10 +24,13 @@ The current model code is intentionally a placeholder. The backend and frontend 
 │   └── config.py
 ├── frontend/
 │   └── streamlit_app.py
-├── models/
+├── attack_pipeline.joblib
+├── severity_pipeline.joblib
+├── type_random_forest.pkl
 ├── Dockerfile.api
 ├── Dockerfile.frontend
 ├── docker-compose.yml
+├── render.yaml
 ├── requirements-api.txt
 └── requirements-frontend.txt
 ```
@@ -31,17 +40,16 @@ The current model code is intentionally a placeholder. The backend and frontend 
 The FastAPI service owns model loading and prediction:
 
 ```text
-GET  /health
-POST /predict
+GET  /health            # aggregate status of all three models
+GET  /health_attack
+GET  /health_severity
+GET  /health_rf
+POST /predict_attack    # {"inputs": {"DESCRIPTION": "..."}}
+POST /predict_severity  # {"inputs": {"DESCRIPTION": "..."}}
+POST /predict_rf        # {"inputs": {<32 network feature fields>}}
 ```
 
-The Streamlit app is only the user interface. It sends JSON to the API and displays the response.
-
-In Docker Compose, the services talk like this:
-
-```text
-Streamlit frontend -> http://api:8000 -> FastAPI backend -> model
-```
+The Streamlit app is only the user interface. It sends JSON to the API (server-side, via `requests`) and displays the response. Because the call happens server-side rather than from the browser, no CORS configuration is needed on the API.
 
 ## Run locally with Docker
 
@@ -93,162 +101,35 @@ In another terminal, start Streamlit:
 API_URL=http://localhost:8000 streamlit run frontend/streamlit_app.py
 ```
 
-## Prediction request format
+## Deploying
 
-The API expects this shape:
+### Backend on Render
 
-```json
-{
-  "inputs": {
-    "feature_1": 10,
-    "feature_2": "example"
-  }
-}
-```
+`render.yaml` at the repo root is a Render Blueprint that builds `Dockerfile.api` as a web service with a `/health` health check.
 
-The Streamlit input box should contain only the inner attributes:
+1. Push this repo to GitHub.
+2. In the Render dashboard: **New > Blueprint**, connect the repo, and Render will pick up `render.yaml`.
+3. Wait for the build to finish, then confirm `https://<your-service>.onrender.com/health` returns `{"status": "ok", ...}`.
 
-```json
-{
-  "feature_1": 10,
-  "feature_2": "example"
-}
-```
+The free Render plan spins the service down after inactivity, so the first request after idle time will be slow while it cold-starts.
 
-The frontend wraps those attributes as `{"inputs": ...}` before sending the request.
+### Frontend on Streamlit Community Cloud
 
-## Model plug-in contract
+1. Push this repo to GitHub (same repo is fine).
+2. On [share.streamlit.io](https://share.streamlit.io), create a new app pointing at this repo, branch, and `frontend/streamlit_app.py` as the entry point. Streamlit Cloud installs `requirements-frontend.txt` automatically (it looks for that name, or `requirements.txt`, at the app's root).
+3. In the app's **Settings > Secrets**, add:
+   ```toml
+   API_URL = "https://<your-service>.onrender.com"
+   ```
+4. Deploy. `frontend/streamlit_app.py` reads `API_URL` from `st.secrets` when present (Streamlit Cloud) and falls back to the `API_URL` environment variable otherwise (local/Docker runs).
 
-When the real model is ready, add the artifact here:
+## Model loading
 
-```text
-models/model.pkl
-```
+`app/model/loader.py` loads the three artifacts by their fixed filenames at the project root — no `MODEL_PATH` configuration is needed. `app/model/predictor.py` wraps each model: text-based models (`attack`, `severity`) expect a `DESCRIPTION` field and call `.predict([text])`; the random forest model expects a single-row DataFrame built from the request's `inputs`.
 
-In Docker, that folder is mounted into the API container:
+The random forest pipeline requires all 32 fields it was trained on. Fields it doesn't have a value for should be sent as JSON `null` (not `"-"` or empty string) — the pipeline's imputer only treats an actual missing value as "use the most common training value"; any other unseen string is encoded as an out-of-vocabulary category, which is a different codepath.
 
-```text
-local ./models -> container /app/models
-```
-
-The expected model path inside the API container is:
-
-```text
-/app/models/model.pkl
-```
-
-If the model file has a different name, update `MODEL_PATH` in `docker-compose.yml`.
-
-## Files the model team should update
-
-The main app should not need to change. The model work belongs in these two files:
-
-```text
-app/model/loader.py
-app/model/predictor.py
-```
-
-Use `loader.py` to load the saved artifact.
-
-Example for joblib/scikit-learn-style models:
-
-```python
-import joblib
-
-def load_model(model_path: str | None):
-    if not model_path:
-        return None
-    return joblib.load(model_path)
-```
-
-Example for pickle:
-
-```python
-import pickle
-
-def load_model(model_path: str | None):
-    if not model_path:
-        return None
-    with open(model_path, "rb") as f:
-        return pickle.load(f)
-```
-
-Use `predictor.py` to convert incoming JSON into whatever the model expects.
-
-Example using a fixed feature order:
-
-```python
-class Predictor:
-    def __init__(self, model):
-        self.model = model
-
-    def predict(self, payload: dict) -> dict:
-        features = [[
-            payload["feature_1"],
-            payload["feature_2"],
-        ]]
-
-        prediction = self.model.predict(features)
-
-        return {
-            "prediction": prediction[0],
-            "confidence": None,
-            "received_input": payload,
-            "model_loaded": self.model is not None,
-        }
-```
-
-Example using a pandas dataframe:
-
-```python
-import pandas as pd
-
-class Predictor:
-    def __init__(self, model):
-        self.model = model
-
-    def predict(self, payload: dict) -> dict:
-        frame = pd.DataFrame([payload])
-        prediction = self.model.predict(frame)
-
-        return {
-            "prediction": prediction[0],
-            "confidence": None,
-            "received_input": payload,
-            "model_loaded": self.model is not None,
-        }
-```
-
-## What the model team should provide
-
-Please include these with the model artifact:
-
-- model filename and format
-- package versions used to train/save it
-- full list of required input attributes
-- feature order, if the model depends on order
-- allowed values for categorical fields
-- expected data types for each field
-- one sample input JSON
-- expected prediction for that sample
-
-Example attribute contract:
-
-```text
-feature_1: number, required
-feature_2: string, required, allowed values: example, control, treatment
-feature_3: integer, optional, default: 0
-```
-
-Example sample input:
-
-```json
-{
-  "feature_1": 10,
-  "feature_2": "example",
-  "feature_3": 0
-}
-```
+`scikit-learn` is pinned to `==1.7.2` in `requirements-api.txt` to match the version the pipelines were trained/saved with. Bumping it isn't safe to do casually — a newer scikit-learn release changed an internal `SimpleImputer` attribute name and broke the random forest pipeline's imputation step outright (`AttributeError: 'SimpleImputer' object has no attribute '_fill_dtype'`) when tested during deployment setup. If you need a newer scikit-learn, re-save the pipelines with it first and re-verify `/predict_rf` end to end.
 
 ## Testing the API
 
@@ -261,31 +142,16 @@ curl http://localhost:8000/health
 Prediction check:
 
 ```bash
-curl -X POST http://localhost:8000/predict \
+curl -X POST http://localhost:8000/predict_attack \
   -H "Content-Type: application/json" \
-  -d '{"inputs": {"feature_1": 10, "feature_2": "example"}}'
+  -d '{"inputs": {"DESCRIPTION": "This is a DDOS attack."}}'
 ```
 
-Expected placeholder response before the model is plugged in:
+After deploying, check that:
 
-```json
-{
-  "prediction": "placeholder_prediction",
-  "confidence": 1.0,
-  "received_input": {
-    "feature_1": 10,
-    "feature_2": "example"
-  },
-  "model_loaded": false
-}
-```
-
-After the model is plugged in, check that:
-
-- `/health` returns `"status": "ok"`
-- `/health` returns `"model_loaded": true`
-- `/predict` returns the expected sample prediction
-- Streamlit shows the same result as the direct API request
+- `/health` returns `"status": "ok"` with all three models `true`
+- `/predict_attack`, `/predict_severity`, `/predict_rf` each return a real prediction (not a 500)
+- Streamlit shows the same results as calling the API directly
 
 ## Before pushing to GitHub
 
@@ -298,5 +164,3 @@ __pycache__/
 .env
 .DS_Store
 ```
-
-Large model files should usually not be committed directly. Use Git LFS or external model storage if the artifact is large or private.

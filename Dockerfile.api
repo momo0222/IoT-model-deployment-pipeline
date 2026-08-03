@@ -7,6 +7,7 @@ COPY requirements-api.txt .
 RUN pip install --no-cache-dir -r requirements-api.txt
 
 COPY app ./app
+COPY attack_pipeline.joblib severity_pipeline.joblib type_random_forest.pkl ./
 
 EXPOSE 8000
 
